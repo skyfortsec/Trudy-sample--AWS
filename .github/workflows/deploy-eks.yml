@@ -1,18 +1,30 @@
-name: Deploy to AWS EKS
+name: EKS Deploy / Destroy / Redeploy
 
 on:
-  push:
-    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What do you want to do?"
+        required: true
+        type: choice
+        options:
+          - deploy
+          - destroy
+          - redeploy
+
+concurrency:
+  group: eks-terraform
+  cancel-in-progress: false
 
 jobs:
-  deploy:
+  run:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # Authenticate to AWS using access keys
+      # AWS auth using access keys (simple)
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -27,20 +39,44 @@ jobs:
 
       - name: Terraform Init
         working-directory: terraform
-        run: terraform init
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_INPUT: "0"
+        run: terraform init -upgrade
 
-      - name: Terraform Apply (EKS + ECR)
+      # DESTROY (runs for destroy or redeploy)
+      - name: Terraform Destroy
+        if: ${{ inputs.action == 'destroy' || inputs.action == 'redeploy' }}
         working-directory: terraform
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_INPUT: "0"
+        run: |
+          terraform destroy -auto-approve \
+            -var="aws_region=${{ vars.AWS_REGION }}" \
+            -var="cluster_name=${{ vars.EKS_CLUSTER_NAME }}" \
+            -var="ecr_repo_name=${{ vars.ECR_REPO_NAME }}"
+
+      # APPLY (runs for deploy or redeploy)
+      - name: Terraform Apply
+        if: ${{ inputs.action == 'deploy' || inputs.action == 'redeploy' }}
+        working-directory: terraform
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_INPUT: "0"
         run: |
           terraform apply -auto-approve \
             -var="aws_region=${{ vars.AWS_REGION }}" \
             -var="cluster_name=${{ vars.EKS_CLUSTER_NAME }}" \
             -var="ecr_repo_name=${{ vars.ECR_REPO_NAME }}"
 
+      # If action is deploy/redeploy, build image + push + deploy k8s
       - name: Login to Amazon ECR
+        if: ${{ inputs.action == 'deploy' || inputs.action == 'redeploy' }}
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build & Push Docker image
+        if: ${{ inputs.action == 'deploy' || inputs.action == 'redeploy' }}
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPO_NAME }}:${GITHUB_SHA}"
@@ -50,26 +86,30 @@ jobs:
           docker push "${IMAGE_URI}"
 
       - name: Configure kubectl for EKS
+        if: ${{ inputs.action == 'deploy' || inputs.action == 'redeploy' }}
         run: |
           aws eks update-kubeconfig \
-            --region ${{ vars.AWS_REGION }} \
-            --name ${{ vars.EKS_CLUSTER_NAME }}
+            --region "${{ vars.AWS_REGION }}" \
+            --name "${{ vars.EKS_CLUSTER_NAME }}"
           kubectl get nodes
 
       - name: Deploy to Kubernetes
+        if: ${{ inputs.action == 'deploy' || inputs.action == 'redeploy' }}
         run: |
           sed "s|IMAGE_PLACEHOLDER|${IMAGE_URI}|g" k8s/deployment.yaml | kubectl apply -f -
           kubectl apply -f k8s/service.yaml
 
       - name: Wait for Service External URL
+        if: ${{ inputs.action == 'deploy' || inputs.action == 'redeploy' }}
         run: |
+          echo "Waiting for LoadBalancer hostname..."
           for i in {1..60}; do
             HOST=$(kubectl get svc static-website-svc -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || true)
             if [ -n "$HOST" ]; then
               echo "Website URL: http://${HOST}"
               exit 0
             fi
-            echo "Waiting for LoadBalancer..."
+            echo "Still provisioning... ($i/60)"
             sleep 10
           done
           kubectl get svc -o wide
