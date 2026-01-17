@@ -38,6 +38,14 @@ module "eks" {
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
 
+  # ✅ FIX: stop Terraform managing CloudWatch log group (prevents "already exists")
+  create_cloudwatch_log_group = false
+  cluster_enabled_log_types   = []
+
+  # ✅ FIX: stop module creating KMS key/alias (prevents "already exists")
+  create_kms_key = false
+  cluster_encryption_config = {}
+
   eks_managed_node_groups = {
     default = {
       instance_types = ["t3.medium"]
@@ -49,5 +57,8 @@ module "eks" {
 }
 
 resource "aws_ecr_repository" "repo" {
-  name = var.ecr_repo_name
+  name         = var.ecr_repo_name
+
+  # ✅ IMPORTANT: allows terraform destroy to delete repo even if images exist
+  force_delete = true
 }
