@@ -1,9 +1,9 @@
 terraform {
   backend "s3" {
     bucket         = "git202"
-    key            = "trudy-eks/terraform.tfstate"
+    key            = "terraform/eks/terraform.tfstate"
     region         = "eu-north-1"
-    dynamodb_table = "YOUR_TF_LOCK_TABLE"
+    dynamodb_table = "git202-tf-locks"
     encrypt        = true
   }
 }
